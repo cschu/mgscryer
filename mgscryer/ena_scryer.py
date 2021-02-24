@@ -41,9 +41,30 @@ class Entity:
                     else:
                         db_ids.append(ids)
         return d
+    @staticmethod
+    def parse_common_fields(xml, caller=None):
+        attribs = dict()
+        identifiers = xml.find("IDENTIFIERS")
+        for field in ("primary_id", "secondary_id", "name", "title", "description"):
+            try:
+                attribs[field] = identifiers.find(field.upper()).text
+            except:
+                attribs[field] = None
+
+        if caller:
+            caller_attribs = dict(Entity.get_tag_value_pairs(
+                xml.find("{cls}_ATTRIBUTES".format(cls=caller.__name__.upper()))))
+
+            attribs["ena_first_public"] = caller_attribs.get("ena-first-public")
+            attribs["ena_last_update"] = caller_attribs.get("ena-last-update")
+            attribs["read_count"] = caller_attribs.get("ena-spot-count")
+
+        return attribs
     def get_linked_entities(self, entity):
         for _id in self.xlinks.get("ena-{}".format(entity.__name__.lower()), list()):
             xml = rest_query(_id)
+            if DEBUG:
+                print(xml)
             try:
                 entity_obj = entity.from_xml(getattr(xml, "{entity}_SET".format(entity=entity.__name__.upper())))
                 if DEBUG:
@@ -66,43 +87,47 @@ class Entity:
     def as_tuple(self):
         return tuple()
     def exists_in_db(self, cursor):
-        exists = check_record_exists(cursor, self.__class__.__name__.lower(), self.primary_id)
-        return exists
-    def insert_into_db(self, cursor):
-        exists = self.exists_in_db(cursor)
+        requires_update = False
+        exists = list(check_record_exists(cursor, self.__class__.__name__.lower(), self.primary_id))
+        if exists and not isinstance(self, Experiment):
+            # we assume that experiments are never updated? they don't have a timestamp
+            new_ts, cur_ts = map(datetime.fromisoformat,
+                (self.ena_last_update, exists[-2 if isinstance(self, Project) else -1][1]))
+            requires_update = new_ts > cur_ts
+        return exists, requires_update
+    def process_updates(self, cursor):
+        has_updates = False
         table = self.__class__.__name__.lower()
-        if not exists:
-            print("new {table} record: {id}".format(table=table, id=self.primary_id))
-            insert_record(cursor, table, self.as_tuple())
+        existing_record, requires_update = self.exists_in_db(cursor)
+        if not existing_record:
+            has_updates = True
+            self.insert_into_db(cursor)
+        elif requires_update:
+            has_updates = True
+            self.update_db_record(cursor, existing_record)
         else:
             print("existing record", table, self.primary_id)
         for child_id, child in self.children.items():
-            child.insert_into_db(cursor)
-            child_table = child.__class__.__name__.lower()
-            link_table_name = "{}_{}".format(table, child_table)
-            link_exists = check_link_exists(
-                cursor, link_table_name, table, child_table,
-                self.primary_id, child.primary_id)
-            if not link_exists:
-                print("new link: {} <- {}".format(self.primary_id, child.primary_id))
-                insert_record(cursor, link_table_name, (self.primary_id, child.primary_id))
-
+            has_updates |= child.process_updates(cursor)
+            update_links(cursor, self, child)
+        return has_updates
+    def insert_into_db(self, cursor):
+        table = self.__class__.__name__.lower()
+        print("new {table} record: {id}".format(table=table, id=self.primary_id))
+        insert_record(cursor, table, self.as_tuple())
+    def update_db_record(self, cursor, current_record):
+        updates = [(header, new_col)
+                   for (header, cur_col), new_col in zip(current_record, self.as_tuple())
+                   if new_col != cur_col]
+        update_record(cursor, self.__class__.__name__.lower(), self.primary_id, updates)
+        print("record updated:", self.__class__.__name__.lower(), self.primary_id, updates)
 
 class Run(Entity):
     def __init__(self, **args):
         super().__init__(**args)
     @classmethod
     def from_xml(cls, xml):
-        attribs = dict()
-        identifiers = xml.find("IDENTIFIERS")
-        try:
-            attribs["primary_id"] = identifiers.find("PRIMARY_ID").text
-        except:
-            attribs["primary_id"] = None
-        try:
-            attribs["title"] = xml.find("TITLE").text
-        except:
-            attribs["title"] = None
+        attribs = Entity.parse_common_fields(xml, caller=cls)
 
         run_attribs = dict(Entity.get_tag_value_pairs(xml.find("RUN_ATTRIBUTES")))
         attribs["read_count"] = run_attribs["ena-spot-count"]
@@ -122,16 +147,8 @@ class Experiment(Entity):
             self.children = dict()
     @classmethod
     def from_xml(cls, xml):
-        attribs = dict()
-        identifiers = xml.find("IDENTIFIERS")
-        try:
-            attribs["primary_id"] = identifiers.find("PRIMARY_ID").text
-        except:
-            attribs["primary_id"] = None
-        try:
-            attribs["title"] = xml.find("TITLE").text
-        except:
-            attribs["title"] = None
+        attribs = Entity.parse_common_fields(xml, caller=cls)
+
         design = xml.find("DESIGN")
         if design:
             lib_desc = design.find("LIBRARY_DESCRIPTOR")
@@ -165,18 +182,10 @@ class Sample(Entity):
             self.children = dict()
     @classmethod
     def from_xml(cls, xml):
-        attribs = dict()
-        identifiers = xml.find("IDENTIFIERS")
-        try:
-            attribs["primary_id"] = identifiers.find("PRIMARY_ID").text
-        except:
-            attribs["primary_id"] = None
-        biosample = identifiers.find(namespace="BioSample")
+        attribs = Entity.parse_common_fields(xml, caller=cls)
+
+        biosample = xml.find("IDENTIFIERS").find(namespace="BioSample")
         attribs["biosample"] = biosample.text if biosample else None
-        try:
-            attribs["title"] = xml.find("TITLE").text
-        except:
-            attribs["title"] = None
         tax_attribs = xml.find("SAMPLE_NAME")
         try:
             taxon_id, scientific_name = map(lambda x:x.text, tax_attribs.children)
@@ -190,6 +199,7 @@ class Sample(Entity):
         attribs["ena_first_public"] = sample_attribs["ena-first-public"]
         attribs["ena_last_update"] = sample_attribs["ena-last-update"]
         return Sample(**attribs)
+
     def as_tuple(self):
         return (self.primary_id, self.biosample, self.title, self.taxon_id, self.scientific_name,
                 self.ena_first_public, self.ena_last_update)
@@ -203,29 +213,7 @@ class Project(Entity):
             self.children = dict()
     @classmethod
     def from_xml(cls, xml):
-        attribs = dict()
-
-        identifiers = xml.find("IDENTIFIERS")
-        try:
-            attribs["primary_id"] = identifiers.find("PRIMARY_ID").text
-        except:
-            attribs["primary_id"] = None
-        try:
-            attribs["secondary_id"] = identifiers.find("SECONDARY_ID").text
-        except:
-            attribs["secondary_id"] = None
-        try:
-            attribs["name"] = xml.find("NAME").text
-        except:
-            attribs["name"] = None
-        try:
-            attribs["title"] = xml.find("TITLE").text
-        except:
-            attribs["title"] = None
-        try:
-            attribs["description"] = xml.find("DESCRIPTION").text
-        except:
-            attribs["description"] = None
+        attribs = Entity.parse_common_fields(xml, caller=cls)
 
         tax_attribs = xml.find("SUBMISSION_PROJECT").find("ORGANISM")
         try:
@@ -239,6 +227,7 @@ class Project(Entity):
         proj_attribs = dict(Entity.get_tag_value_pairs(xml.find("PROJECT_ATTRIBUTES")))
         attribs["ena_first_public"] = proj_attribs["ena-first-public"]
         attribs["ena_last_update"] = proj_attribs["ena-last-update"]
+        print(*attribs.items(), sep="\n")
         return Project(**attribs)
 
     def as_tuple(self):
@@ -257,7 +246,9 @@ def check_record_exists(cursor, table, id_):
     cmd = "SELECT * FROM {table} WHERE id = ?;".format(table=table)
     cursor.execute(cmd, (id_,))
     rows = cursor.fetchall()
-    return rows
+    if rows:
+        return zip([d[0] for d in cursor.description], rows[0])
+    return None
 
 def insert_record(cursor, table, values):
     cmd = "INSERT INTO {table} VALUES ({dummy})".format(
@@ -274,7 +265,26 @@ def get_latest_timestamp(cursor):
     except:
         return datetime(1970, 1, 1)
 
+def update_links(cursor, entity1, entity2):
+    table1, table2 = map(lambda x:x.__class__.__name__, (entity1, entity2))
+    link_table = "_".join((table1, table2))
+    link_exists = check_link_exists(cursor, link_table, table1, table2, 
+                                    entity1.primary_id, entity2.primary_id)
+    if not link_exists:
+        print("new link: {} <- {}".format(entity1.primary_id, entity2.primary_id))
+        insert_record(cursor, link_table, (entity1.primary_id, entity2.primary_id))
+
+def update_record(cursor, table, _id, updates):
+    update_ops = ", ".join(["{col} = ?".format(col=col) for col, _ in updates])
+    cmd = "UPDATE {table} SET {update_ops} WHERE id = ?;".format(table=table, update_ops=update_ops)
+    print(cmd)
+    res = cursor.execute(cmd, [val for _, val in updates] + [_id])
+    for row in res:
+        print(row) 
+
 def rest_query(query_str, base_url=BASE_API_URL):
+    if DEBUG:
+        print(base_url + query_str)
     xml = requests.get(base_url + query_str).content.decode()
     xml = xml.replace("\n", "")
     xml = re.sub(">\s+<", "><", xml)
@@ -301,87 +311,9 @@ def main():
             if i > 10:
                 break
             project = Project.from_xml(project)
-            project.insert_into_db(cursor)
+            has_updates = project.process_updates(cursor)
             print("*************************************************")
 
 
 if __name__ == "__main__":
     main()
-
-def process_data_block(n, data, cursor, latest_timestamp):
-    print(n, len(data), "records")
-    for record in data:
-        timestamp = datetime.fromisoformat(record["attributes"]["last-update"])
-        if timestamp > latest_timestamp:
-            existing_record, updated_record = insert_study_record(record, cursor)
-            message = ["Study {id} has an update.".format(id=record["id"])]
-            if existing_record:
-                message.append("existing record:")
-                message.append("\n".join(":".join(item) for item in zip(STUDY_COLUMNS, map(str, existing_record))))
-                message.append("updated record:")
-                message.append("\n".join(":".join(item) for item in zip(STUDY_COLUMNS, map(str, updated_record))))
-            elif updated_record:
-                message.append("new record")
-                message.append("\n".join(":".join(item) for item in zip(STUDY_COLUMNS, map(str, updated_record))))
-            else:
-                return True
-            message = "\n".join(message)
-            print(message)
-            # subprocess.check_output("echo {message} | mailx -s 'mgscryer-update for {id}' christian.schudoma@embl.de".format(message=message, id=record["id"]), shell=True)
-        else:
-            print("Record has timestamp {}, which is not newer than our latest timestamp {}. Nothing new, aborting.".format(timestamp, latest_timestamp))
-            return False
-    return True
-
-def insert_study_record(record, cursor):
-    study_id = record["id"]
-    attributes = record["attributes"]
-
-    values = (
-        record["id"],
-        attributes["bioproject"],
-        attributes["accession"],
-        int(attributes["samples-count"]),
-        attributes["secondary-accession"],
-        attributes["centre-name"],
-        int(attributes["is-public"]),
-        attributes["public-release-date"],
-        attributes["study-abstract"],
-        attributes["study-name"],
-        attributes["data-origination"],
-        attributes["last-update"],
-        0
-    )
-
-    existing_record = check_study_exists(study_id, cursor)
-
-    if existing_record:
-        existing_record = existing_record[0]
-        print("Study {id} is already known".format(id=study_id))
-        #message = "Study {id} has an update.".format(id=record["id"])
-        #p = subprocess.check_output("echo {message} | mailx -s 'mgscryer-update for {id}' christian.schudoma@embl.de".format(message=message, id=record["id"]), shell=True)
-        update_cols, update_vals = list(), list()
-        for col, old_value, new_value in zip(STUDY_COLUMNS, existing_record, values):
-            if old_value != new_value:
-                update_cols.append(col)
-                update_vals.append(new_value)
-        if update_cols:
-            update_ops = ", ".join(["{col} = ?".format(col=col) for col in update_cols])
-            cmd = "UPDATE study SET {update_ops} WHERE id = ?;".format(update_ops=update_ops)
-            cursor.execute(cmd, update_vals + [study_id])
-            return existing_record, values
-
-    else:
-        cmd = "INSERT INTO study VALUES ({value_placeholders})"
-        res = cursor.execute(cmd.format(value_placeholders=",".join("?" for f in values)), values)
-        for row in res:
-            print(row)
-        return None, values
-
-    return None, None
-
-
-
-
-
-
