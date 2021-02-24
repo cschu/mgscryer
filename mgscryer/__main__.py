@@ -129,20 +129,10 @@ def get_mgnify_studies(db):
                 has_unknown_records = process_data_block(page, data["data"], cursor, latest_timestamp)
                 if not has_unknown_records:
                     break
-            
-
-        
-        
-
-
 
 
 def main():
-
-
     get_mgnify_studies(DATABASE_PATH)
-
-    pass
 
 
 
