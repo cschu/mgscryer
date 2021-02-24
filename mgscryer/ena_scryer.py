@@ -15,7 +15,6 @@ PROJECT_QUERY = "search?query=host_tax_id=9606%20AND%20(instrument_platform=%22I
 DEBUG = False
 
 class Entity:
-    ena_name = None
     @staticmethod
     def get_tag_value_pairs(xml):
         for child in xml.children:
@@ -43,27 +42,53 @@ class Entity:
                         db_ids.append(ids)
         return d
     def get_linked_entities(self, entity):
-        for _id in self.xlinks.get(entity.ena_name.lower(), list()):
+        for _id in self.xlinks.get("ena-{}".format(entity.__name__.lower()), list()):
             xml = rest_query(_id)
             try:
-                entity_obj = entity.from_xml(getattr(xml, "{entity}_SET".format(entity=entity.ena_name.replace("ENA-", ""))))
+                entity_obj = entity.from_xml(getattr(xml, "{entity}_SET".format(entity=entity.__name__.upper())))
                 if DEBUG:
                     entity_obj.show()
             except:
-                print("WARNING: {entity_type} {id} does not yield result.".format(entity_type=entity.ena_name, id=_id), file=sys.stderr)
+                print("WARNING: {entity_type} {id} does not yield result.".format(
+                    entity_type="ENA-{}".format(entity.__name__.upper()), id=_id),
+                    file=sys.stderr)
                 entity_obj = None
                 raise
             yield _id, entity_obj
 
     def __init__(self, **args):
+        self.children = dict()
+        self.primary_id = None
         for k, v in args.items():
             setattr(self, k, v)
     def show(self):
         print(*self.__dict__.items(), sep="\n")
+    def as_tuple(self):
+        return tuple()
+    def exists_in_db(self, cursor):
+        exists = check_record_exists(cursor, self.__class__.__name__.lower(), self.primary_id)
+        return exists
+    def insert_into_db(self, cursor):
+        exists = self.exists_in_db(cursor)
+        table = self.__class__.__name__.lower()
+        if not exists:
+            print("new {table} record: {id}".format(table=table, id=self.primary_id))
+            insert_record(cursor, table, self.as_tuple())
+        else:
+            print("existing record", table, self.primary_id)
+        for child_id, child in self.children.items():
+            child.insert_into_db(cursor)
+            child_table = child.__class__.__name__.lower()
+            link_table_name = "{}_{}".format(table, child_table)
+            link_exists = check_link_exists(
+                cursor, link_table_name, table, child_table,
+                self.primary_id, child.primary_id)
+            if not link_exists:
+                print("new link: {} <- {}".format(self.primary_id, child.primary_id))
+                insert_record(cursor, link_table_name, (self.primary_id, child.primary_id))
 
 
 class Run(Entity):
-    ena_name = "ENA-RUN"
     def __init__(self, **args):
         super().__init__(**args)
     @classmethod
@@ -89,10 +114,12 @@ class Run(Entity):
         return (self.primary_id, self.title, self.read_count, self.ena_first_public, self.ena_last_update)
 
 class Experiment(Entity):
-    ena_name = "ENA-EXPERIMENT"
     def __init__(self, **args):
         super().__init__(**args)
-        self.runs = dict(self.get_linked_entities(Run))
+        try:
+            self.children = dict(self.get_linked_entities(Run))
+        except:
+            self.children = dict()
     @classmethod
     def from_xml(cls, xml):
         attribs = dict()
@@ -130,10 +157,12 @@ class Experiment(Entity):
 
 
 class Sample(Entity):
-    ena_name = "ENA-SAMPLE"
     def __init__(self, **args):
         super().__init__(**args)
-        self.experiments = dict(self.get_linked_entities(Experiment))
+        try:
+            self.children = dict(self.get_linked_entities(Experiment))
+        except:
+            self.children = dict()
     @classmethod
     def from_xml(cls, xml):
         attribs = dict()
@@ -166,10 +195,12 @@ class Sample(Entity):
                 self.ena_first_public, self.ena_last_update)
 
 class Project(Entity):
-    ena_name = "ENA-STUDY"
     def __init__(self, **args):
         super().__init__(**args)
-        self.samples = dict(self.get_linked_entities(Sample))
+        try:
+            self.children = dict(self.get_linked_entities(Sample))
+        except:
+            self.children = dict()
     @classmethod
     def from_xml(cls, xml):
         attribs = dict()
@@ -270,50 +301,7 @@ def main():
             if i > 10:
                 break
             project = Project.from_xml(project)
-            project_exists = check_record_exists(cursor, "project", project.primary_id)
-            if not project_exists:
-                print("new {table} record".format(table='project'))
-                insert_record(cursor, 'project', project.as_tuple())
-
-            for sample in project.samples.values():
-                sample_exists = check_record_exists(cursor, "sample", sample.primary_id)
-                if not sample_exists:
-                    print("new {table} record".format(table='sample'))
-                    insert_record(cursor, 'sample', sample.as_tuple())
-
-                link_exists = check_link_exists(cursor, "project_sample", "project", "sample",
-                                                project.primary_id, sample.primary_id)
-                if not link_exists:
-                    print("new link: {project_id} <- {sample_id}".format(
-                        project_id=project.primary_id, sample_id=sample.primary_id))
-                    insert_record(cursor, 'project_sample', (project.primary_id, sample.primary_id))
-
-                for experiment in sample.experiments.values():
-                    experiment_exists = check_record_exists(cursor, "experiment", experiment.primary_id)
-                    if not experiment_exists:
-                        print("new {table} record".format(table='experiment'))
-                        insert_record(cursor, 'experiment', experiment.as_tuple())
-
-                    link_exists = check_link_exists(cursor, "sample_experiment", "sample", "experiment",
-                                                    sample.primary_id, experiment.primary_id)
-                    if not link_exists:
-                        print("new link: {sample_id} <- {experiment_id}".format(
-                            sample_id=sample.primary_id, experiment_id=experiment.primary_id))
-                        insert_record(cursor, 'sample_experiment', (sample.primary_id, experiment.primary_id))
-
-                    for run in experiment.runs.values():
-                        run_exists = check_record_exists(cursor, "run", run.primary_id)
-                        if not run_exists:
-                            print("new {table} record".format(table='run'))
-                            insert_record(cursor, 'run', run.as_tuple())
-
-                        link_exists = check_link_exists(cursor, "experiment_run", "experiment", "run",
-                                                        experiment.primary_id, run.primary_id)
-                        if not link_exists:
-                            print("new link: {experiment_id} <- {run_id}".format(
-                                experiment_id=experiment.primary_id, run_id=run.primary_id))
-                            insert_record(cursor, 'experiment_run', (experiment.primary_id, run.primary_id))
-
+            project.insert_into_db(cursor)
             print("*************************************************")
 
 
