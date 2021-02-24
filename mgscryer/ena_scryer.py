@@ -1,22 +1,28 @@
 import re
 import sys
+from datetime import datetime
 import urllib.parse
+import argparse
+import sqlite3
 
 from bs4 import BeautifulSoup
 import urllib3
+import requests
 
 BASE_API_URL = "https://www.ebi.ac.uk/ena/browser/api/xml/"
 PROJECT_QUERY = "search?query=host_tax_id=9606%20AND%20(instrument_platform=%22ILLUMINA%22%20AND%20(%20instrument_model!=%22Illumina%20Genome%20Analyzer%22%20AND%20instrument_model!=%22Illumina%20Genome%20Analyzer%20II%22%20AND%20instrument_model!=%22Illumina%20Genome%20Analyzer%20IIx%22%20)%20AND%20(%20(%20library_strategy=%22WGS%22%20AND%20library_source=%22METAGENOMIC%22%20)%20OR%20(%20library_strategy=%22RNA-Seq%22%20AND%20library_source=%22METATRANSCRIPTOMIC%22%20)%20))&result=read_study"
 
+DEBUG = False
 
 class Entity:
+    ena_name = None
     @staticmethod
     def get_tag_value_pairs(xml):
         for child in xml.children:
-            yield child.find("tag").text.lower(), child.find("value").text.lower()
+            yield child.find("TAG").text.lower(), child.find("VALUE").text.lower()
     @staticmethod
     def parse_xlink_ids(ids):
-        start, end = ids.split("-") 
+        start, end = ids.split("-")
         prefix = "".join(map(lambda c:(c if c.isalpha() else " "), start)).strip().split(" ")[0]
         suffix = "{{id:0{n}d}}".format(n=len(start) - len(prefix))
         start, end = map(lambda x:int(x[len(prefix):]), (start, end))
@@ -25,7 +31,7 @@ class Entity:
     def parse_xlinks(xml):
         d = dict()
         for plink in xml.children:
-            xlink = plink.find("xref_link")
+            xlink = plink.find("XREF_LINK")
             db, val = map(lambda x:x.text, xlink.children)
             db = db.lower()
             if db in {"pubmed", "ena-sample", "ena-experiment", "ena-run"}:
@@ -36,201 +42,358 @@ class Entity:
                     else:
                         db_ids.append(ids)
         return d
-
+    def get_linked_entities(self, entity):
+        for _id in self.xlinks.get(entity.ena_name.lower(), list()):
+            xml = rest_query(_id)
+            try:
+                entity_obj = entity.from_xml(getattr(xml, "{entity}_SET".format(entity=entity.ena_name.replace("ENA-", ""))))
+                if DEBUG:
+                    entity_obj.show()
+            except:
+                print("WARNING: {entity_type} {id} does not yield result.".format(entity_type=entity.ena_name, id=_id), file=sys.stderr)
+                entity_obj = None
+                raise
+            yield _id, entity_obj
 
     def __init__(self, **args):
-        for k, v in args.items():        
+        for k, v in args.items():
             setattr(self, k, v)
     def show(self):
         print(*self.__dict__.items(), sep="\n")
-    
-class Sample(Entity):
+
+
+class Run(Entity):
+    ena_name = "ENA-RUN"
     def __init__(self, **args):
         super().__init__(**args)
-        
-        
     @classmethod
     def from_xml(cls, xml):
         attribs = dict()
-
-
-        print("SAMPLE_XML")
-        print(xml)
-
-        identifiers = xml.find("identifiers")
+        identifiers = xml.find("IDENTIFIERS")
         try:
-            attribs["primary_id"] = identifiers.find("primary_id").text
+            attribs["primary_id"] = identifiers.find("PRIMARY_ID").text
         except:
             attribs["primary_id"] = None
-        print(identifiers, file=sys.stderr)
-        biosample = identifiers.find(namespace="BioSample")
-        attribs["biosample"] = biosample.text if biosample else None
-        try: 
-            attribs["title"] = xml.find("title").text
+        try:
+            attribs["title"] = xml.find("TITLE").text
         except:
             attribs["title"] = None
-        tax_attribs = xml.find("sample_name")
+
+        run_attribs = dict(Entity.get_tag_value_pairs(xml.find("RUN_ATTRIBUTES")))
+        attribs["read_count"] = run_attribs["ena-spot-count"]
+        attribs["ena_first_public"] = run_attribs["ena-first-public"]
+        attribs["ena_last_update"] = run_attribs["ena-last-update"]
+
+        return Run(**attribs)
+    def as_tuple(self):
+        return (self.primary_id, self.title, self.read_count, self.ena_first_public, self.ena_last_update)
+
+class Experiment(Entity):
+    ena_name = "ENA-EXPERIMENT"
+    def __init__(self, **args):
+        super().__init__(**args)
+        self.runs = dict(self.get_linked_entities(Run))
+    @classmethod
+    def from_xml(cls, xml):
+        attribs = dict()
+        identifiers = xml.find("IDENTIFIERS")
+        try:
+            attribs["primary_id"] = identifiers.find("PRIMARY_ID").text
+        except:
+            attribs["primary_id"] = None
+        try:
+            attribs["title"] = xml.find("TITLE").text
+        except:
+            attribs["title"] = None
+        design = xml.find("DESIGN")
+        if design:
+            lib_desc = design.find("LIBRARY_DESCRIPTOR")
+            if lib_desc:
+                for child in lib_desc.children:
+                    tag = child.name.lower()
+                    if tag in ("library_strategy", "library_source", "library_selection"):
+                        attribs[tag] = child.text
+                    elif tag == "library_layout":
+                        attribs["library_layout"] = next(child.children).name
+            attribs["spot_length"] = design.find("SPOT_LENGTH").text
+
+        platform = xml.find("PLATFORM")
+        attribs["instrument"] = platform.find("INSTRUMENT_MODEL").text
+
+        attribs["xlinks"] = Entity.parse_xlinks(xml.find("EXPERIMENT_LINKS"))
+
+        return Experiment(**attribs)
+
+    def as_tuple(self):
+        return (self.primary_id, self.title, self.library_strategy, self.library_source,
+                self.library_selection, self.library_layout, self.spot_length, self.instrument)
+
+
+class Sample(Entity):
+    ena_name = "ENA-SAMPLE"
+    def __init__(self, **args):
+        super().__init__(**args)
+        self.experiments = dict(self.get_linked_entities(Experiment))
+    @classmethod
+    def from_xml(cls, xml):
+        attribs = dict()
+        identifiers = xml.find("IDENTIFIERS")
+        try:
+            attribs["primary_id"] = identifiers.find("PRIMARY_ID").text
+        except:
+            attribs["primary_id"] = None
+        biosample = identifiers.find(namespace="BioSample")
+        attribs["biosample"] = biosample.text if biosample else None
+        try:
+            attribs["title"] = xml.find("TITLE").text
+        except:
+            attribs["title"] = None
+        tax_attribs = xml.find("SAMPLE_NAME")
         try:
             taxon_id, scientific_name = map(lambda x:x.text, tax_attribs.children)
         except:
             taxon_id, scientific_name = None, None
         attribs.update({"taxon_id": taxon_id, "scientific_name": scientific_name})
 
-        sample_attribs = dict(Entity.get_tag_value_pairs(xml.find("sample_attributes"))) 
-        attribs["ena-first-public"] = sample_attribs["ena-first-public"]
-        attribs["ena-last-update"] = sample_attribs["ena-last-update"]
-        
-        return Sample(**attribs)
+        attribs["xlinks"] = Entity.parse_xlinks(xml.find("SAMPLE_LINKS"))
 
-        
+        sample_attribs = dict(Entity.get_tag_value_pairs(xml.find("SAMPLE_ATTRIBUTES")))
+        attribs["ena_first_public"] = sample_attribs["ena-first-public"]
+        attribs["ena_last_update"] = sample_attribs["ena-last-update"]
+        return Sample(**attribs)
+    def as_tuple(self):
+        return (self.primary_id, self.biosample, self.title, self.taxon_id, self.scientific_name,
+                self.ena_first_public, self.ena_last_update)
 
 class Project(Entity):
+    ena_name = "ENA-STUDY"
     def __init__(self, **args):
         super().__init__(**args)
-        self._samples = dict(self._get_samples())
-    @staticmethod
-    def parse_project_links(xml):
-        d = dict()
-        for plink in xml.children:
-            xlink = plink.find("xref_link")
-            db, val = map(lambda x:x.text, xlink.children)
-            db = db.lower()
-            if db in {"pubmed", "ena-sample", "ena-experiment", "ena-run"}:
-                d[db] = db_ids = list()
-                for ids in val.split(","):
-                    if "-" in ids:
-                        db_ids.extend(Entity.parse_xlink_ids(ids))
-                    else:
-                        db_ids.append(ids)
-        return d
-    def _get_samples(self):
-        for sample_id in self.xlinks.get("ena-sample", list()):
-            sample_xml = rest_query(sample_id)
-            try:
-                sample = Sample.from_xml(sample_xml.sample_set)
-            except:
-                print("WARNING: sample {sample_id} does not yield result.".format(sample_id=sample_id), file=sys.stderr)
-                sample = None
-            yield sample_id, sample
+        self.samples = dict(self.get_linked_entities(Sample))
     @classmethod
     def from_xml(cls, xml):
         attribs = dict()
 
-        identifiers = xml.find("identifiers")
+        identifiers = xml.find("IDENTIFIERS")
         try:
-            attribs["primary_id"] = identifiers.find("primary_id").text
+            attribs["primary_id"] = identifiers.find("PRIMARY_ID").text
         except:
             attribs["primary_id"] = None
         try:
-            attribs["secondary_id"] = identifiers.find("secondary_id").text
+            attribs["secondary_id"] = identifiers.find("SECONDARY_ID").text
         except:
             attribs["secondary_id"] = None
-        try:        
-            attribs["name"] = xml.find("name").text
+        try:
+            attribs["name"] = xml.find("NAME").text
         except:
             attribs["name"] = None
         try:
-            attribs["title"] = xml.find("title").text
+            attribs["title"] = xml.find("TITLE").text
         except:
             attribs["title"] = None
         try:
-            attribs["description"] = xml.find("description").text
+            attribs["description"] = xml.find("DESCRIPTION").text
         except:
             attribs["description"] = None
 
-        tax_attribs = xml.find("submission_project").find("organism")
+        tax_attribs = xml.find("SUBMISSION_PROJECT").find("ORGANISM")
         try:
             taxon_id, scientific_name = map(lambda x:x.text, tax_attribs.children)
         except:
             taxon_id, scientific_name = None, None
         attribs.update({"taxon_id": taxon_id, "scientific_name": scientific_name})
-        print("PRIMARY", attribs.get("primary_id"))
 
-        #plinks = Project.parse_project_links(xml.find("project_links"))
-        plinks = Entity.parse_xlinks(xml.find("project_links"))
-        print(*plinks.items(), sep="\n")
-        attribs["xlinks"] = plinks
+        attribs["xlinks"] = Entity.parse_xlinks(xml.find("PROJECT_LINKS"))
 
-        proj_attribs = dict(Entity.get_tag_value_pairs(xml.find("project_attributes")))
-        attribs["ena-first-public"] = proj_attribs["ena-first-public"]
-        attribs["ena-last-update"] = proj_attribs["ena-last-update"]
-            
+        proj_attribs = dict(Entity.get_tag_value_pairs(xml.find("PROJECT_ATTRIBUTES")))
+        attribs["ena_first_public"] = proj_attribs["ena-first-public"]
+        attribs["ena_last_update"] = proj_attribs["ena-last-update"]
         return Project(**attribs)
 
-def get_mgnify_studies(db):
-    http = urllib3.PoolManager()
-    conn = sqlite3.connect(db)
+    def as_tuple(self):
+        return (self.primary_id, self.secondary_id, self.name, self.title,
+                self.description, self.ena_first_public, self.ena_last_update, None)
 
-    with conn:
-        cursor = conn.cursor()
-        try:
-            latest_timestamp = get_latest_timestamp(cursor)
-        except:
-            latest_timestamp = datetime(1900,1,1)
 
-        for lineage in BIOME_LINEAGES:
-            request_str = "{apibase}/studies?lineage={lineage}&page={page}&page_size=100".format(apibase=APIBASE, lineage=lineage, page="{page}")
-            request = http.request("GET", request_str.format(page=1))
-            page_data = json.loads(request.data)
-            npages = page_data["meta"]["pagination"]["pages"]
+def check_link_exists(cursor, table, entity1, entity2, id1, id2):
+    cmd = "SELECT * FROM {table} WHERE {entity1}_id = ? AND {entity2}_id = ?;".format(
+        table=table, entity1=entity1, entity2=entity2)
+    cursor.execute(cmd, (id1, id2))
+    rows = cursor.fetchall()
+    return rows
 
-            data = page_data
-            for page in range(1, npages + 1):
-                if page > 1:
-                    data = json.loads(http.request("GET", request_str.format(page=page)).data)
-                has_unknown_records = process_data_block(page, data["data"], cursor, latest_timestamp)
-                if not has_unknown_records:
-                    break
+def check_record_exists(cursor, table, id_):
+    cmd = "SELECT * FROM {table} WHERE id = ?;".format(table=table)
+    cursor.execute(cmd, (id_,))
+    rows = cursor.fetchall()
+    return rows
 
-def query_projects():
-    http = urllib3.PoolManager()
-    projects_xml = http.request("GET", PROJECT_QUERY).data.decode()
-    projects_xml.replace("\n", "")
-    projects_xml =  re.sub(">\s+<", "><", projects_xml)
-    return projects_xml
-    
+def insert_record(cursor, table, values):
+    cmd = "INSERT INTO {table} VALUES ({dummy})".format(
+        table=table, dummy=",".join("?" for f in values))
+    res = cursor.execute(cmd, values)
+    for row in res:
+        print(row)
+
+def get_latest_timestamp(cursor):
+    try:
+        cursor.execute("SELECT MAX(ena_last_update) FROM study;")
+        rows = cursor.fetchall()
+        return datetime.fromisoformat(rows[0][0])
+    except:
+        return datetime(1970, 1, 1)
+
 def rest_query(query_str, base_url=BASE_API_URL):
-    http = urllib3.PoolManager()
-    print(base_url + query_str)
-    xml = http.request("GET", base_url + query_str).data.decode()
+    xml = requests.get(base_url + query_str).content.decode()
     xml = xml.replace("\n", "")
     xml = re.sub(">\s+<", "><", xml)
-    soup = BeautifulSoup(xml, "lxml")
+    # https://stackoverflow.com/questions/14822188/dont-put-html-head-and-body-tags-automatically-beautifulsoup
+    # THIS SHOULD BE IN THE MAIN DOCS...
+    soup = BeautifulSoup(xml, "lxml-xml")
     return soup
- 
-    
 
 def main():
-    #raw_project_xml = open(sys.argv[1]).read()
-    #raw_project_xml = raw_project_xml.replace("\n", "")
-    #raw_project_xml = re.sub(">\s+<", "><", raw_project_xml)
-    
-    #print(raw_project_xml)
-    #sys.exit(0)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("db")
+    args = ap.parse_args()
 
-    #raw_project_xml = rest_query(PROJECT_QUERY)
-    # print(raw_project_xml)[:1000]
-    #print(raw_project_xml) 
-    #soup = BeautifulSoup(raw_project_xml, "lxml")
-    
-    soup = rest_query(PROJECT_QUERY)
-    projects = soup.project_set
-    
-    for i, project in enumerate(projects.find_all("project")):
-        if i > 10:
-            break
-        Project.from_xml(project).show()
-        print("*************************************************")
-    #
-    #project = projects.find("project")
-    #while project:
-    #    print(type(project))
-    #    print(project["accession"])
-    #    project = project.next_sibling
-    #    print(project)
-    #
-    #
+    conn = sqlite3.connect(args.db)
+    with conn:
+        cursor = conn.cursor()
+        latest_timestamp = get_latest_timestamp(cursor)
+
+
+        soup = rest_query(PROJECT_QUERY)
+        projects = soup.PROJECT_SET
+
+        for i, project in enumerate(projects.find_all("PROJECT")):
+            if i > 10:
+                break
+            project = Project.from_xml(project)
+            project_exists = check_record_exists(cursor, "project", project.primary_id)
+            if not project_exists:
+                print("new {table} record".format(table='project'))
+                insert_record(cursor, 'project', project.as_tuple())
+
+            for sample in project.samples.values():
+                sample_exists = check_record_exists(cursor, "sample", sample.primary_id)
+                if not sample_exists:
+                    print("new {table} record".format(table='sample'))
+                    insert_record(cursor, 'sample', sample.as_tuple())
+
+                link_exists = check_link_exists(cursor, "project_sample", "project", "sample",
+                                                project.primary_id, sample.primary_id)
+                if not link_exists:
+                    print("new link: {project_id} <- {sample_id}".format(
+                        project_id=project.primary_id, sample_id=sample.primary_id))
+                    insert_record(cursor, 'project_sample', (project.primary_id, sample.primary_id))
+
+                for experiment in sample.experiments.values():
+                    experiment_exists = check_record_exists(cursor, "experiment", experiment.primary_id)
+                    if not experiment_exists:
+                        print("new {table} record".format(table='experiment'))
+                        insert_record(cursor, 'experiment', experiment.as_tuple())
+
+                    link_exists = check_link_exists(cursor, "sample_experiment", "sample", "experiment",
+                                                    sample.primary_id, experiment.primary_id)
+                    if not link_exists:
+                        print("new link: {sample_id} <- {experiment_id}".format(
+                            sample_id=sample.primary_id, experiment_id=experiment.primary_id))
+                        insert_record(cursor, 'sample_experiment', (sample.primary_id, experiment.primary_id))
+
+                    for run in experiment.runs.values():
+                        run_exists = check_record_exists(cursor, "run", run.primary_id)
+                        if not run_exists:
+                            print("new {table} record".format(table='run'))
+                            insert_record(cursor, 'run', run.as_tuple())
+
+                        link_exists = check_link_exists(cursor, "experiment_run", "experiment", "run",
+                                                        experiment.primary_id, run.primary_id)
+                        if not link_exists:
+                            print("new link: {experiment_id} <- {run_id}".format(
+                                experiment_id=experiment.primary_id, run_id=run.primary_id))
+                            insert_record(cursor, 'experiment_run', (experiment.primary_id, run.primary_id))
+
+            print("*************************************************")
 
 
 if __name__ == "__main__":
     main()
+
+def process_data_block(n, data, cursor, latest_timestamp):
+    print(n, len(data), "records")
+    for record in data:
+        timestamp = datetime.fromisoformat(record["attributes"]["last-update"])
+        if timestamp > latest_timestamp:
+            existing_record, updated_record = insert_study_record(record, cursor)
+            message = ["Study {id} has an update.".format(id=record["id"])]
+            if existing_record:
+                message.append("existing record:")
+                message.append("\n".join(":".join(item) for item in zip(STUDY_COLUMNS, map(str, existing_record))))
+                message.append("updated record:")
+                message.append("\n".join(":".join(item) for item in zip(STUDY_COLUMNS, map(str, updated_record))))
+            elif updated_record:
+                message.append("new record")
+                message.append("\n".join(":".join(item) for item in zip(STUDY_COLUMNS, map(str, updated_record))))
+            else:
+                return True
+            message = "\n".join(message)
+            print(message)
+            # subprocess.check_output("echo {message} | mailx -s 'mgscryer-update for {id}' christian.schudoma@embl.de".format(message=message, id=record["id"]), shell=True)
+        else:
+            print("Record has timestamp {}, which is not newer than our latest timestamp {}. Nothing new, aborting.".format(timestamp, latest_timestamp))
+            return False
+    return True
+
+def insert_study_record(record, cursor):
+    study_id = record["id"]
+    attributes = record["attributes"]
+
+    values = (
+        record["id"],
+        attributes["bioproject"],
+        attributes["accession"],
+        int(attributes["samples-count"]),
+        attributes["secondary-accession"],
+        attributes["centre-name"],
+        int(attributes["is-public"]),
+        attributes["public-release-date"],
+        attributes["study-abstract"],
+        attributes["study-name"],
+        attributes["data-origination"],
+        attributes["last-update"],
+        0
+    )
+
+    existing_record = check_study_exists(study_id, cursor)
+
+    if existing_record:
+        existing_record = existing_record[0]
+        print("Study {id} is already known".format(id=study_id))
+        #message = "Study {id} has an update.".format(id=record["id"])
+        #p = subprocess.check_output("echo {message} | mailx -s 'mgscryer-update for {id}' christian.schudoma@embl.de".format(message=message, id=record["id"]), shell=True)
+        update_cols, update_vals = list(), list()
+        for col, old_value, new_value in zip(STUDY_COLUMNS, existing_record, values):
+            if old_value != new_value:
+                update_cols.append(col)
+                update_vals.append(new_value)
+        if update_cols:
+            update_ops = ", ".join(["{col} = ?".format(col=col) for col in update_cols])
+            cmd = "UPDATE study SET {update_ops} WHERE id = ?;".format(update_ops=update_ops)
+            cursor.execute(cmd, update_vals + [study_id])
+            return existing_record, values
+
+    else:
+        cmd = "INSERT INTO study VALUES ({value_placeholders})"
+        res = cursor.execute(cmd.format(value_placeholders=",".join("?" for f in values)), values)
+        for row in res:
+            print(row)
+        return None, values
+
+    return None, None
+
+
+
+
+
+
