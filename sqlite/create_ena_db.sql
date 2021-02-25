@@ -1,5 +1,4 @@
 DROP TABLE IF EXISTS project;
-
 CREATE TABLE IF NOT EXISTS project(
     id TEXT PRIMARY KEY,
     secondary_id TEXT,
@@ -18,6 +17,14 @@ CREATE TABLE IF NOT EXISTS project_sample(
     FOREIGN KEY ([project_id]) REFERENCES 'projects' ([id])
         ON DELETE NO ACTION ON UPDATE NO ACTION,
     FOREIGN KEY ([sample_id]) REFERENCES 'samples' ([id])
+        ON DELETE NO ACTION ON UPDATE NO ACTION
+);
+
+DROP TABLE IF EXISTS project_pubmed;
+CREATE TABLE IF NOT EXISTS project_pubmed(
+    project_id TEXT NOT NULL,
+    pubmed_id TEXT NOT NULL,
+    FOREIGN KEY ([project_id]) REFERENCES 'projects' ([id])
         ON DELETE NO ACTION ON UPDATE NO ACTION
 );
 
