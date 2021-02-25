@@ -1,3 +1,4 @@
+import time
 import re
 import sys
 from datetime import datetime
@@ -10,7 +11,7 @@ import urllib3
 import requests
 
 BASE_API_URL = "https://www.ebi.ac.uk/ena/browser/api/xml/"
-PROJECT_QUERY = "search?query=host_tax_id=9606%20AND%20(instrument_platform=%22ILLUMINA%22%20AND%20(%20instrument_model!=%22Illumina%20Genome%20Analyzer%22%20AND%20instrument_model!=%22Illumina%20Genome%20Analyzer%20II%22%20AND%20instrument_model!=%22Illumina%20Genome%20Analyzer%20IIx%22%20)%20AND%20(%20(%20library_strategy=%22WGS%22%20AND%20library_source=%22METAGENOMIC%22%20)%20OR%20(%20library_strategy=%22RNA-Seq%22%20AND%20library_source=%22METATRANSCRIPTOMIC%22%20)%20))&result=read_study"
+PROJECT_QUERY = "search?query=host_tax_id=9606%20AND%20(instrument_platform=%22ILLUMINA%22%20AND%20(%20instrument_model!=%22Illumina%20Genome%20Analyzer%22%20AND%20instrument_model!=%22Illumina%20Genome%20Analyzer%20II%22%20AND%20instrument_model!=%22Illumina%20Genome%20Analyzer%20IIx%22%20)%20AND%20(%20(%20library_strategy=%22WGS%22%20AND%20library_source=%22METAGENOMIC%22%20)%20OR%20(%20library_strategy=%22RNA-Seq%22%20AND%20library_source=%22METATRANSCRIPTOMIC%22%20)%20))&result=read_study&sortFields=accession" #last_updated"
 
 DEBUG = False
 
@@ -18,7 +19,14 @@ class Entity:
     @staticmethod
     def get_tag_value_pairs(xml):
         for child in xml.children:
-            yield child.find("TAG").text.lower(), child.find("VALUE").text.lower()
+            tag = child.find("TAG")
+            if tag:
+                tag = tag.text.lower()
+            value = child.find("VALUE")
+            if value:
+                value = value.text.lower()
+            if tag and value:
+                yield tag, value
     @staticmethod
     def parse_xlink_ids(ids):
         start, end = ids.split("-")
@@ -52,12 +60,13 @@ class Entity:
                 attribs[field] = None
 
         if caller:
-            caller_attribs = dict(Entity.get_tag_value_pairs(
-                xml.find("{cls}_ATTRIBUTES".format(cls=caller.__name__.upper()))))
+            caller_attribs = xml.find("{cls}_ATTRIBUTES".format(cls=caller.__name__.upper()))
+            if caller_attribs:
+                caller_attribs = dict(Entity.get_tag_value_pairs(caller_attribs))
 
-            attribs["ena_first_public"] = caller_attribs.get("ena-first-public")
-            attribs["ena_last_update"] = caller_attribs.get("ena-last-update")
-            attribs["read_count"] = caller_attribs.get("ena-spot-count")
+                attribs["ena_first_public"] = caller_attribs.get("ena-first-public")
+                attribs["ena_last_update"] = caller_attribs.get("ena-last-update")
+                attribs["read_count"] = caller_attribs.get("ena-spot-count")
 
         return attribs
     def get_linked_entities(self, entity):
@@ -106,7 +115,8 @@ class Entity:
             has_updates = True
             self.update_db_record(cursor, existing_record)
         else:
-            print("existing record", table, self.primary_id)
+            if DEBUG:
+                print("existing record", table, self.primary_id)
         for child_id, child in self.children.items():
             has_updates |= child.process_updates(cursor)
             update_links(cursor, self, child)
@@ -159,7 +169,10 @@ class Experiment(Entity):
                         attribs[tag] = child.text
                     elif tag == "library_layout":
                         attribs["library_layout"] = next(child.children).name
-            attribs["spot_length"] = design.find("SPOT_LENGTH").text
+            try:
+                attribs["spot_length"] = design.find("SPOT_LENGTH").text
+            except:
+                attribs["spot_length"] = None
 
         platform = xml.find("PLATFORM")
         attribs["instrument"] = platform.find("INSTRUMENT_MODEL").text
@@ -227,7 +240,7 @@ class Project(Entity):
         proj_attribs = dict(Entity.get_tag_value_pairs(xml.find("PROJECT_ATTRIBUTES")))
         attribs["ena_first_public"] = proj_attribs["ena-first-public"]
         attribs["ena_last_update"] = proj_attribs["ena-last-update"]
-        print(*attribs.items(), sep="\n")
+
         return Project(**attribs)
 
     def as_tuple(self):
@@ -248,7 +261,7 @@ def check_record_exists(cursor, table, id_):
     rows = cursor.fetchall()
     if rows:
         return zip([d[0] for d in cursor.description], rows[0])
-    return None
+    return list()
 
 def insert_record(cursor, table, values):
     cmd = "INSERT INTO {table} VALUES ({dummy})".format(
@@ -268,7 +281,7 @@ def get_latest_timestamp(cursor):
 def update_links(cursor, entity1, entity2):
     table1, table2 = map(lambda x:x.__class__.__name__, (entity1, entity2))
     link_table = "_".join((table1, table2))
-    link_exists = check_link_exists(cursor, link_table, table1, table2, 
+    link_exists = check_link_exists(cursor, link_table, table1, table2,
                                     entity1.primary_id, entity2.primary_id)
     if not link_exists:
         print("new link: {} <- {}".format(entity1.primary_id, entity2.primary_id))
@@ -280,9 +293,10 @@ def update_record(cursor, table, _id, updates):
     print(cmd)
     res = cursor.execute(cmd, [val for _, val in updates] + [_id])
     for row in res:
-        print(row) 
+        print(row)
 
 def rest_query(query_str, base_url=BASE_API_URL):
+    time.sleep(0.1)
     if DEBUG:
         print(base_url + query_str)
     xml = requests.get(base_url + query_str).content.decode()
@@ -310,8 +324,22 @@ def main():
         for i, project in enumerate(projects.find_all("PROJECT")):
             if i > 10:
                 break
-            project = Project.from_xml(project)
+            try:
+                project = Project.from_xml(project)
+            except:
+                print(project)
+                raise
+
+            for pmid in project.xlinks.get("pubmed", list()):
+                try:
+                    insert_record(cursor, "project_pubmed", (project.primary_id, pmid))
+                except:
+                    pass
+
             has_updates = project.process_updates(cursor)
+            if has_updates:
+                print("UPDATES available:")
+                project.show()
             print("*************************************************")
 
 
