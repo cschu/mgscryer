@@ -11,9 +11,12 @@ import urllib3
 import requests
 
 BASE_API_URL = "https://www.ebi.ac.uk/ena/browser/api/xml/"
-PROJECT_QUERY = "search?query=host_tax_id=9606%20AND%20(instrument_platform=%22ILLUMINA%22%20AND%20(%20instrument_model!=%22Illumina%20Genome%20Analyzer%22%20AND%20instrument_model!=%22Illumina%20Genome%20Analyzer%20II%22%20AND%20instrument_model!=%22Illumina%20Genome%20Analyzer%20IIx%22%20)%20AND%20(%20(%20library_strategy=%22WGS%22%20AND%20library_source=%22METAGENOMIC%22%20)%20OR%20(%20library_strategy=%22RNA-Seq%22%20AND%20library_source=%22METATRANSCRIPTOMIC%22%20)%20))&result=read_study&sortFields=accession" #last_updated"
+PROJECT_QUERY = "search?query=host_tax_id=9606%20AND%20(instrument_platform=%22ILLUMINA%22%20AND%20(%20instrument_model!=%22Illumina%20Genome%20Analyzer%22%20AND%20instrument_model!=%22Illumina%20Genome%20Analyzer%20II%22%20AND%20instrument_model!=%22Illumina%20Genome%20Analyzer%20IIx%22%20)%20AND%20(%20(%20library_strategy=%22WGS%22%20AND%20library_source=%22METAGENOMIC%22%20)%20OR%20(%20library_strategy=%22RNA-Seq%22%20AND%20library_source=%22METATRANSCRIPTOMIC%22%20)%20))&result=read_study&sortFields=accession" #last_updated" <- this doesn't work >:(
 
 DEBUG = False
+
+class EntityParseError(Exception):
+    ...
 
 class Entity:
     @staticmethod
@@ -29,6 +32,7 @@ class Entity:
                 yield tag, value
     @staticmethod
     def parse_xlink_ids(ids):
+        # obsolete?
         start, end = ids.split("-")
         prefix = "".join(map(lambda c:(c if c.isalpha() else " "), start)).strip().split(" ")[0]
         suffix = "{{id:0{n}d}}".format(n=len(start) - len(prefix))
@@ -37,17 +41,14 @@ class Entity:
     @staticmethod
     def parse_xlinks(xml):
         d = dict()
-        for plink in xml.children:
-            xlink = plink.find("XREF_LINK")
+        for link in xml.children:
+            xlink = link.find("XREF_LINK")
             db, val = map(lambda x:x.text, xlink.children)
             db = db.lower()
-            if db in {"pubmed", "ena-sample", "ena-experiment", "ena-run"}:
-                d[db] = db_ids = list()
-                for ids in val.split(","):
-                    if "-" in ids:
-                        db_ids.extend(Entity.parse_xlink_ids(ids))
-                    else:
-                        db_ids.append(ids)
+            if db == "pubmed":
+                d[db] = val.split(",")
+            elif db in {"ena-sample", "ena-experiment", "ena-run"}:
+                d[db] = val
         return d
     @staticmethod
     def parse_common_fields(xml, caller=None):
@@ -69,22 +70,25 @@ class Entity:
                 attribs["read_count"] = caller_attribs.get("ena-spot-count")
 
         return attribs
-    def get_linked_entities(self, entity):
-        for _id in self.xlinks.get("ena-{}".format(entity.__name__.lower()), list()):
-            xml = rest_query(_id)
+    def get_linked_entities(self, entity_type):
+        entity_name = entity_type.__name__
+        entities = dict()
+        ids = self.xlinks.get("ena-{}".format(entity_name.lower()))
+        if ids:
+            xml = rest_query(ids)
             if DEBUG:
+                print(entity_name)
                 print(xml)
-            try:
-                entity_obj = entity.from_xml(getattr(xml, "{entity}_SET".format(entity=entity.__name__.upper())))
-                if DEBUG:
-                    entity_obj.show()
-            except:
-                print("WARNING: {entity_type} {id} does not yield result.".format(
-                    entity_type="ENA-{}".format(entity.__name__.upper()), id=_id),
-                    file=sys.stderr)
-                entity_obj = None
-                raise
-            yield _id, entity_obj
+            for entity_xml in xml.find_all(entity_name.upper()):
+                try:
+                    entity_obj = entity_type.from_xml(entity_xml)
+                    if DEBUG:
+                        entity_obj.show()
+                except:
+                    raise EntityParseError("{entity_type} {id} could not be parsed".format(entity_type=entity_name.lower(), id=_id))
+                entities[entity_obj.primary_id] = entity_obj
+
+        return entities
 
     def __init__(self, **args):
         self.children = dict()
@@ -123,7 +127,8 @@ class Entity:
         return has_updates
     def insert_into_db(self, cursor):
         table = self.__class__.__name__.lower()
-        print("new {table} record: {id}".format(table=table, id=self.primary_id))
+        if DEBUG:
+            print("new {table} record: {id}".format(table=table, id=self.primary_id))
         insert_record(cursor, table, self.as_tuple())
     def update_db_record(self, cursor, current_record):
         updates = [(header, new_col)
@@ -151,10 +156,7 @@ class Run(Entity):
 class Experiment(Entity):
     def __init__(self, **args):
         super().__init__(**args)
-        try:
-            self.children = dict(self.get_linked_entities(Run))
-        except:
-            self.children = dict()
+        self.children = self.get_linked_entities(Run)
     @classmethod
     def from_xml(cls, xml):
         attribs = Entity.parse_common_fields(xml, caller=cls)
@@ -189,10 +191,7 @@ class Experiment(Entity):
 class Sample(Entity):
     def __init__(self, **args):
         super().__init__(**args)
-        try:
-            self.children = dict(self.get_linked_entities(Experiment))
-        except:
-            self.children = dict()
+        self.children = self.get_linked_entities(Experiment)
     @classmethod
     def from_xml(cls, xml):
         attribs = Entity.parse_common_fields(xml, caller=cls)
@@ -220,10 +219,7 @@ class Sample(Entity):
 class Project(Entity):
     def __init__(self, **args):
         super().__init__(**args)
-        try:
-            self.children = dict(self.get_linked_entities(Sample))
-        except:
-            self.children = dict()
+        self.children = self.get_linked_entities(Sample)
     @classmethod
     def from_xml(cls, xml):
         attribs = Entity.parse_common_fields(xml, caller=cls)
@@ -267,8 +263,9 @@ def insert_record(cursor, table, values):
     cmd = "INSERT INTO {table} VALUES ({dummy})".format(
         table=table, dummy=",".join("?" for f in values))
     res = cursor.execute(cmd, values)
-    for row in res:
-        print(row)
+    if DEBUG:
+        for row in res:
+            print(row)
 
 def get_latest_timestamp(cursor):
     try:
@@ -284,20 +281,23 @@ def update_links(cursor, entity1, entity2):
     link_exists = check_link_exists(cursor, link_table, table1, table2,
                                     entity1.primary_id, entity2.primary_id)
     if not link_exists:
-        print("new link: {} <- {}".format(entity1.primary_id, entity2.primary_id))
+        if DEBUG:
+            print("new link: {} <- {}".format(entity1.primary_id, entity2.primary_id))
         insert_record(cursor, link_table, (entity1.primary_id, entity2.primary_id))
 
 def update_record(cursor, table, _id, updates):
     update_ops = ", ".join(["{col} = ?".format(col=col) for col, _ in updates])
     cmd = "UPDATE {table} SET {update_ops} WHERE id = ?;".format(table=table, update_ops=update_ops)
-    print(cmd)
-    res = cursor.execute(cmd, [val for _, val in updates] + [_id])
-    for row in res:
-        print(row)
-
-def rest_query(query_str, base_url=BASE_API_URL):
-    time.sleep(0.1)
     if DEBUG:
+        print(cmd)
+    res = cursor.execute(cmd, [val for _, val in updates] + [_id])
+    if DEBUG:
+        for row in res:
+            print(row)
+
+def rest_query(query_str, base_url=BASE_API_URL, verbose=False):
+    time.sleep(0.1)
+    if verbose:
         print(base_url + query_str)
     xml = requests.get(base_url + query_str).content.decode()
     xml = xml.replace("\n", "")
@@ -316,7 +316,6 @@ def main():
     with conn:
         cursor = conn.cursor()
         latest_timestamp = get_latest_timestamp(cursor)
-
 
         soup = rest_query(PROJECT_QUERY)
         projects = soup.PROJECT_SET
