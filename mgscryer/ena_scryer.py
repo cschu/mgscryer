@@ -32,12 +32,19 @@ class Entity:
                 yield tag, value
     @staticmethod
     def parse_xlink_ids(ids):
-        # obsolete?
-        start, end = ids.split("-")
-        prefix = "".join(map(lambda c:(c if c.isalpha() else " "), start)).strip().split(" ")[0]
-        suffix = "{{id:0{n}d}}".format(n=len(start) - len(prefix))
-        start, end = map(lambda x:int(x[len(prefix):]), (start, end))
-        return ["{prefix}{suffix}".format(prefix=prefix, suffix=suffix.format(id=_id)) for _id in range(start, end + 1)]
+        individual_ids = list()
+        ids = ids.split(",")
+        for item in ids:
+            item = item.split("-")
+            if len(item) == 1:
+                individual_ids.extend(item)
+            else:
+                start, end = item
+                prefix = "".join(map(lambda c:(c if c.isalpha() else " "), start)).strip().split(" ")[0]
+                suffix = "{{id:0{n}d}}".format(n=len(start) - len(prefix))
+                start, end = map(lambda x:int(x[len(prefix):]), (start, end))
+                individual_ids.extend("{prefix}{suffix}".format(prefix=prefix, suffix=suffix.format(id=_id)) for _id in range(start, end + 1))
+        return individual_ids
     @staticmethod
     def parse_xlinks(xml):
         d = dict()
@@ -75,18 +82,19 @@ class Entity:
         entities = dict()
         ids = self.xlinks.get("ena-{}".format(entity_name.lower()))
         if ids:
-            xml = rest_query(ids)
-            if DEBUG:
-                print(entity_name)
-                print(xml)
-            for entity_xml in xml.find_all(entity_name.upper()):
-                try:
-                    entity_obj = entity_type.from_xml(entity_xml)
-                    if DEBUG:
-                        entity_obj.show()
-                except:
-                    raise EntityParseError("{entity_type} {id} could not be parsed".format(entity_type=entity_name.lower(), id=_id))
-                entities[entity_obj.primary_id] = entity_obj
+            for idrange in ids.split(","):
+                xml = rest_query(idrange)
+                if DEBUG:
+                    print(entity_name)
+                    print(xml)
+                for entity_xml in xml.find_all(entity_name.upper()):
+                    try:
+                        entity_obj = entity_type.from_xml(entity_xml)
+                        if DEBUG:
+                            entity_obj.show()
+                    except:
+                        raise EntityParseError("{entity_type} could not be parsed.\n{xml}".format(entity_type=entity_name.lower(), xml=entity_xml))
+                    entities[entity_obj.primary_id] = entity_obj
 
         return entities
 
@@ -96,7 +104,8 @@ class Entity:
         for k, v in args.items():
             setattr(self, k, v)
     def show(self):
-        print(*self.__dict__.items(), sep="\n")
+        print(self.primary_id, self.ena_last_update, len(self.children), sep="\n")
+        #print(*self.__dict__.items(), sep="\n")
     def as_tuple(self):
         return tuple()
     def exists_in_db(self, cursor):
@@ -145,9 +154,11 @@ class Run(Entity):
         attribs = Entity.parse_common_fields(xml, caller=cls)
 
         run_attribs = dict(Entity.get_tag_value_pairs(xml.find("RUN_ATTRIBUTES")))
-        attribs["read_count"] = run_attribs["ena-spot-count"]
-        attribs["ena_first_public"] = run_attribs["ena-first-public"]
-        attribs["ena_last_update"] = run_attribs["ena-last-update"]
+        attribs["read_count"] = run_attribs.get("ena-spot-count")
+        attribs["ena_first_public"] = run_attribs.get("ena-first-public")
+        attribs["ena_last_update"] = run_attribs.get("ena-last-update")
+
+        attribs["xlinks"] = Entity.parse_xlinks(xml.find("RUN_LINKS"))
 
         return Run(**attribs)
     def as_tuple(self):
@@ -156,7 +167,6 @@ class Run(Entity):
 class Experiment(Entity):
     def __init__(self, **args):
         super().__init__(**args)
-        self.children = self.get_linked_entities(Run)
     @classmethod
     def from_xml(cls, xml):
         attribs = Entity.parse_common_fields(xml, caller=cls)
@@ -191,7 +201,6 @@ class Experiment(Entity):
 class Sample(Entity):
     def __init__(self, **args):
         super().__init__(**args)
-        self.children = self.get_linked_entities(Experiment)
     @classmethod
     def from_xml(cls, xml):
         attribs = Entity.parse_common_fields(xml, caller=cls)
@@ -208,8 +217,8 @@ class Sample(Entity):
         attribs["xlinks"] = Entity.parse_xlinks(xml.find("SAMPLE_LINKS"))
 
         sample_attribs = dict(Entity.get_tag_value_pairs(xml.find("SAMPLE_ATTRIBUTES")))
-        attribs["ena_first_public"] = sample_attribs["ena-first-public"]
-        attribs["ena_last_update"] = sample_attribs["ena-last-update"]
+        attribs["ena_first_public"] = sample_attribs.get("ena-first-public")
+        attribs["ena_last_update"] = sample_attribs.get("ena-last-update")
         return Sample(**attribs)
 
     def as_tuple(self):
@@ -219,7 +228,30 @@ class Sample(Entity):
 class Project(Entity):
     def __init__(self, **args):
         super().__init__(**args)
-        self.children = self.get_linked_entities(Sample)
+        self._process_children()
+    def _process_children(self):
+        self.children = samples = self.get_linked_entities(Sample)
+        experiments = self.get_linked_entities(Experiment)
+        runs = self.get_linked_entities(Run)
+
+        for sample_id, sample in samples.items():
+            experiment_ids = sample.xlinks.get("ena-experiment")
+            if not experiment_ids:
+                raise ValueError("cannot find experiment ids for sample {}".format(sample.primary_id))
+            for experiment_id in Entity.parse_xlink_ids(experiment_ids):
+                experiment = experiments.get(experiment_id)
+                if not experiment:
+                    print(*experiments.items(), sep="\n")
+                    raise ValueError("didn't parse experiment {} for project {}".format(experiment_id, self.primary_id))
+                sample.children[experiment_id] = experiment
+                run_ids = experiment.xlinks.get("ena-run")
+                if not run_ids:
+                    raise ValueError("cannot find run ids for experiment {}".format(experiment.primary_id))
+                for run_id in Entity.parse_xlink_ids(run_ids):
+                    run = runs.get(run_id)
+                    if not run:
+                        raise ValueError("didn't parse run {} for project {}".format(run_id, self.primary_id))
+                    experiment.children[run_id] = run
     @classmethod
     def from_xml(cls, xml):
         attribs = Entity.parse_common_fields(xml, caller=cls)
@@ -234,8 +266,8 @@ class Project(Entity):
         attribs["xlinks"] = Entity.parse_xlinks(xml.find("PROJECT_LINKS"))
 
         proj_attribs = dict(Entity.get_tag_value_pairs(xml.find("PROJECT_ATTRIBUTES")))
-        attribs["ena_first_public"] = proj_attribs["ena-first-public"]
-        attribs["ena_last_update"] = proj_attribs["ena-last-update"]
+        attribs["ena_first_public"] = proj_attribs.get("ena-first-public")
+        attribs["ena_last_update"] = proj_attribs.get("ena-last-update")
 
         return Project(**attribs)
 
@@ -321,8 +353,9 @@ def main():
         projects = soup.PROJECT_SET
 
         for i, project in enumerate(projects.find_all("PROJECT")):
-            if i > 10:
-                break
+            #if i > 10:
+            #    break
+                
             try:
                 project = Project.from_xml(project)
             except:
@@ -339,6 +372,8 @@ def main():
             if has_updates:
                 print("UPDATES available:")
                 project.show()
+            else:
+                print("Project {}: no updates".format(project.primary_id))
             print("*************************************************")
 
 

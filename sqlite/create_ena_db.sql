@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS project(
     description TEXT, 
     ena_first_public TEXT,
     ena_last_update TEXT,
-    status INTEGER DEFAULT 0
+    status INTEGER DEFAULT 1
 );
 
 DROP TABLE IF EXISTS project_sample;
@@ -79,3 +79,55 @@ CREATE TABLE IF NOT EXISTS run(
     ena_first_public TEXT,
     ena_last_update TEXT
 );
+
+DROP TABLE IF EXISTS project_status;
+CREATE TABLE IF NOT EXISTS project_status(
+    id INTEGER DEFAULT 1,
+    label TEXT NOT NULL
+);
+
+--                               _________ IGNORED(4)
+--                             /             /
+-- poll -> NEW(1)|IMPORTANT(2) -- ASSIGNED(8) <-------
+--                                           \        \     
+--                                         IN_PROGRESS(16) -> DONE(32)
+
+
+INSERT INTO project_status VALUES(1, 'NEW'); -- obtained from latest poll
+INSERT INTO project_status VALUES(2, 'IMPORTANT'); -- obtained from latest poll and ticks some boxes
+INSERT INTO project_status VALUES(4, 'IGNORED'); -- study was ignored (negative outcome of ASSIGNED|NEW|IMPORTANT) 
+INSERT INTO project_status VALUES(8, 'ASSIGNED'); -- study was assigned to someone
+INSERT INTO project_status VALUES(16, 'IN_PROGRESS'); -- study was submitted to be processed (positive outcome of ASSIGNED)
+INSERT INTO project_status VALUES(32, 'DONE'); -- study was processed successfully (positive outcome of IN_PROGRESS)
+
+DROP TABLE IF EXISTS scryer_users;
+CREATE TABLE IF NOT EXISTS scryer_users(
+    id TEXT PRIMARY KEY,
+    full_name TEXT,
+    admin INTEGER DEFAULT 0
+);
+
+INSERT INTO scryer_users VALUES('karcher', 'Nic Karcher', 0)
+INSERT INTO scryer_users VALUES('milanese', 'Alessio Milanese', 0)
+INSERT INTO scryer_users VALUES('schudoma', 'Christian Schudoma', 1)
+INSERT INTO scryer_users VALUES('wirbel', 'Jakob Wirbel', 0)
+INSERT INTO scryer_users VALUES('zeller', 'Georg Zeller', 1)
+
+
+DROP TABLE IF EXISTS project_user;
+CREATE TABLE IF NOT EXISTS project_user(
+    project_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    FOREIGN KEY ([project_id]) REFERENCES 'projects' ([id])
+        ON DELETE NO ACTION ON UPDATE NO ACTION,               
+    FOREIGN KEY ([user_id]) REFERENCES 'scryer_users' ([id])
+        ON DELETE NO ACTION ON UPDATE NO ACTION,
+);
+
+
+
+
+
+
+
+
