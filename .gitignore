@@ -1,3 +1,4 @@
 devdata
 logs
 __pycache__
+*.sqlite
