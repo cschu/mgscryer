@@ -10,7 +10,7 @@ import json
 from bs4 import BeautifulSoup
 import requests
 
-from db_helpers import check_record_exists, insert_record, update_record, check_link_exists
+from db_helpers import check_record_exists, insert_record, update_record, check_link_exists, update_tax_trees, check_tax_trees
 from pubmed import PubmedQuery
 
 DEBUG = False
@@ -105,16 +105,22 @@ class Record:
         self.record_states = dict()
 
     def update_db(self, cursor, tax_tree=None):
-        for i, field in enumerate(Record.FIELDS):
+        for field in Record.FIELDS:
             entity = getattr(self, field)
             new_record, updated_record = entity.update_db(cursor)
             self.record_states[field] = (new_record, updated_record)
-            if field == "study" and not check_link_exists(cursor, "study_taxtree", "study_accession", "tax_tree", entity.study_accession, tax_tree):
-                try:
-                    insert_record(cursor, "study_taxtree", (entity.study_accession, tax_tree))
-                except Exception as e:
-                    print(e)
-                    print(f"Couldn't insert tax_tree link: {entity.study_accession} <-> {tax_tree}")
+            if field == "study":
+                trees = check_tax_trees(cursor, entity.study_accession) 
+                if trees:
+                    tax_tree = int(tax_tree)
+                    if tax_tree == 9606 and 9606 not in map(int, trees):
+                        update_tax_trees(cursor, entity.study_accession, tax_tree)
+                else:
+                    try:
+                        insert_record(cursor, "study_taxtree", (entity.study_accession, tax_tree))
+                    except Exception as e:
+                        print(e)
+                        print(f"Couldn't insert tax_tree link: {entity.study_accession} <-> {tax_tree}")
 
 class EnaPortalScryer:
     def __init__(self, db, base_url=BASE_API_URL, query=MAIN_QUERY, sub_query="", limit=1000, sleep_interval=0.1):

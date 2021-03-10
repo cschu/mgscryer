@@ -7,6 +7,18 @@ def check_link_exists(cursor, table, field1, field2, id1, id2):
     rows = cursor.fetchall()
     return rows
 
+def check_tax_trees(cursor, study_accession):
+    cmd = "SELECT tax_tree FROM study_taxtree WHERE study_accession = ?;"
+    cursor.execute(cmd, (study_accession,))
+    rows = cursor.fetchall()
+    if rows:
+        return [r[0] for r in rows]
+    return list()
+
+def update_tax_trees(cursor, study_accession, tax_tree):
+    cmd = "UPDATE study_taxtree SET tax_tree = ? WHERE study_accession = ?;"
+    cursor.execute(cmd, (tax_tree,study_accession))
+
 # https://stackoverflow.com/questions/7831371/is-there-a-way-to-get-a-list-of-column-names-in-sqlite
 def check_record_exists(cursor, table, id_):
     cmd = "SELECT * FROM {table} WHERE {table}_accession = ?;".format(table=table)
