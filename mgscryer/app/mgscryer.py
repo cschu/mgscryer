@@ -22,7 +22,7 @@ def hiya():
 @app.route("/dbtest")
 def dbtest():
     from display import display_data
-    db = "/home/schudoma/mgscryer/sqlite/ena_portal_db_5.sqlite"
+    db = "/congo/DB/MGSCRYER/mgscryer_db.sqlite"
     conn = sqlite3.connect(db)
     cursor = conn.cursor()
 

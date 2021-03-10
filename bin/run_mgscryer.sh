@@ -1,10 +1,12 @@
 #!/bin/bash
 
-SCRYER_DB=/home/schudoma/mgscryer/sqlite/ena_portal_db_3.sqlite
-SCRYER=/home/schudoma/mgscryer/mgscryer/ena_portal_scryer.py
-SCRYER_LOGS=/home/schudoma/mgscryer/logs
+SCRYER_PATH=/congo/DB/MGSCRYER
 
-conda activate mgscryer_env
+SCRYER_DB=$SCRYER_PATH/mgscryer_db.sqlite
+SCRYER=/home/schudoma/mgscryer/mgscryer/ena_portal_scryer.py
+SCRYER_LOGS=$SCRYER_PATH/logs
+
+conda activate /home/schudoma/miniconda3/envs/mgscryer_crawler_env
 mkdir -p $SCRYER_LOGS
 python $SCRYER $SCRYER_DB > $SCRYER_LOGS/`date +%Y%m%d-%H_%M`.log
 

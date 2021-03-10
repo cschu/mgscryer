@@ -87,7 +87,8 @@ def display_data(cursor):
     return "".join(output)
     
 if __name__ == "__main__":
-    conn = sqlite3.connect("/home/schudoma/mgscryer/sqlite/ena_portal_db_3.sqlite")
+    #conn = sqlite3.connect("/home/schudoma/mgscryer/sqlite/ena_portal_db_3.sqlite")
+    conn = sqlite3.connect("/congo/DB/MGSCRYER/mgscryer_db.sqlite")
     string = display_data(conn.cursor())
     print(string)
     
