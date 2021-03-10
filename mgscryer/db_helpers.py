@@ -1,8 +1,8 @@
 DEBUG = False
 
 def check_link_exists(cursor, table, field1, field2, id1, id2):
-    cmd = "SELECT * FROM {table} WHERE {field1} = ? AND {field2} = ?;".format(
-        table=table, entity1=entity1, entity2=entity2)
+    cmd = f"SELECT * FROM {table} WHERE {field1} = ? AND {field2} = ?;"#.format(
+    #    table=table, entity1=entity1, entity2=entity2)
     cursor.execute(cmd, (id1, id2))
     rows = cursor.fetchall()
     return rows
@@ -16,7 +16,7 @@ def check_record_exists(cursor, table, id_):
         return zip([d[0] for d in cursor.description], rows[0])
     return list()
 
-def check_link_exists(cursor, table1, table2, id1, id2):
+def check_link_exists_old(cursor, table1, table2, id1, id2):
     cmd = f"SELECT * FROM {table1}_{table2} WHERE {table1}_accession = ? AND {table2}_accession = ?;"
     cursor.execute(cmd, (id1, id2))
     rows = cursor.fetchall()

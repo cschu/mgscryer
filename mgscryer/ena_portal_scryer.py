@@ -28,7 +28,7 @@ BASE_QUERY = "instrument_platform=%22ILLUMINA%22" \
 MAIN_QUERY = f"search?result=read_run&includeMetagenomes=1&format=json&fields={','.join(FIELDS)}&query={BASE_QUERY}"
 
 def get_tax_trees(cursor):
-    cursor.execute("SELECT * FROM clades;")
+    cursor.execute("SELECT * FROM tax_trees;")
     rows = cursor.fetchall()
     return [row[0:2] for row in rows]
 def get_last_update(cursor):
@@ -66,7 +66,7 @@ class Study(Entity):
         return super().to_tuple() + (0,)
 
 class Sample(Entity):
-    FIELDS = ["sample_accession", "host", "host_body_site", "host_tax_id", "environment_biome", "last_updated"]
+    FIELDS = ["sample_accession", "host", "host_body_site", "host_tax_id", "environment_biome", "study_accession", "last_updated"]
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         
@@ -74,7 +74,7 @@ class Run(Entity):
     FIELDS = ["run_accession", "experiment_title", 
               "description", "instrument_model", "instrument_platform",
               "library_source", "library_layout", "library_strategy",
-              "nominal_length", "read_count", "last_updated"]
+              "nominal_length", "read_count", "sample_accession", "last_updated"]
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
@@ -84,24 +84,32 @@ class Record:
         self.study = Study(**kwargs)
         self.sample = Sample(**kwargs)
         self.run = Run(**kwargs)
+        self.record_states = dict()
 
-    def update_db(self, cursor):
-        record_states = list()
+    def update_db(self, cursor, tax_tree=None):
         for i, field in enumerate(Record.FIELDS):
             entity = getattr(self, field)
             new_record, updated_record = entity.update_db(cursor)
-            record_states.append((new_record, updated_record))
-            if field != "run":
-                entity2 = getattr(self, Record.FIELDS[i + 1])
-                table = "_".join(Record.FIELDS[i:i + 2])
-                id1, id2 = getattr(entity, entity.FIELDS[0]), getattr(entity2, entity2.FIELDS[0])
-                if not check_link_exists(cursor, *table.split("_"), id1, id2):
-                    try:
-                        insert_record(cursor, table, (id1, id2))
-                    except Exception as e:
-                        print(e)
-                        print(f"Couldn't update {table}: {id1} {id2}")
-        return record_states
+            self.record_states[field] = (new_record, updated_record)
+            # def check_link_exists(cursor, table, field1, field2, id1, id2):
+            if field == "study" and not check_link_exists(cursor, "study_taxtree", "study_accession", "tax_tree", entity.study_accession, tax_tree):
+                try:
+                    insert_record(cursor, "study_taxtree", (entity.study_accession, tax_tree))
+                except Exception as e:
+                    print(e)
+                    print(f"Couldn't insert tax_tree link: {entity.study_accession} <-> {tax_tree}")
+
+            #if field != "run":
+            #    entity2 = getattr(self, Record.FIELDS[i + 1])
+            #    table = "_".join(Record.FIELDS[i:i + 2])
+            #    id1, id2 = getattr(entity, entity.FIELDS[0]), getattr(entity2, entity2.FIELDS[0])
+            #    if not check_link_exists(cursor, *table.split("_"), id1, id2):
+            #        try:
+            #            insert_record(cursor, table, (id1, id2))
+            #        except Exception as e:
+            #            print(e)
+            #            print(f"Couldn't update {table}: {id1} {id2}")
+        #return record_states
 
 class EnaPortalScryer:
     def __init__(self, db, base_url=BASE_API_URL, query=MAIN_QUERY, sub_query="", limit=1000, sleep_interval=0.1):
@@ -124,16 +132,17 @@ class EnaPortalScryer:
             query_string = self.base_url + self.query.format(**locals())
             response = self._get_records(query_string)
             for i, record in enumerate(response):
-                entity_states = record.update_db(self.conn.cursor())
+                #entity_states = record.update_db(self.conn.cursor(), tax_tree=tax_tree)
+                record.update_db(self.conn.cursor(), tax_tree=tax_tree)
                 study_d = record_states.setdefault(record.study.study_accession, dict())
                 if not study_d:
-                    study_d["state"] = entity_states[0]
+                    study_d["state"] = record.record_states["study"] #entity_states[0]
                     study_d["samples"] = dict()
                 sample_d = study_d["samples"].setdefault(record.sample.sample_accession, dict())
                 if not sample_d:
-                    sample_d["state"] = entity_states[1]
+                    sample_d["state"] = record.record_states["sample"] #entity_states[1]
                     sample_d["runs"] = dict()
-                run_d = sample_d["runs"].setdefault(record.run.run_accession, entity_states[2])
+                run_d = sample_d["runs"].setdefault(record.run.run_accession, record.record_states["run"])
                 studies.add(record.study.study_accession)
             try:
                 i = i

@@ -14,7 +14,10 @@ CREATE TABLE IF NOT EXISTS sample(
     host_body_site TEXT,
     host_tax_id TEXT,
     environment_biome TEXT,
-    last_updated TEXT
+    study_accession TEXT NOT NULL,
+    last_updated TEXT,
+    FOREIGN KEY ([study_accession]) REFERENCES 'study' ([study_accession])
+        ON DELETE NO ACTION ON UPDATE NO ACTION
 );
 
 DROP TABLE IF EXISTS run;
@@ -28,8 +31,11 @@ CREATE TABLE IF NOT EXISTS run(
     library_layout TEXT,
     library_strategy TEXT,
     nominal_length INTEGER,
-    read_count INTEGER,    
-    last_updated TEXT
+    read_count INTEGER,
+    sample_accession TEXT NOT NULL,
+    last_updated TEXT,
+    FOREIGN KEY ([sample_accession]) REFERENCES 'sample' ([sample_accession])
+        ON DELETE NO ACTION ON UPDATE NO ACTION
 );
 
 DROP TABLE IF EXISTS study_sample;
@@ -71,14 +77,26 @@ CREATE TABLE IF NOT EXISTS timepoints(
 
 INSERT INTO timepoints VALUES("last_update", "2021-01-01T00:00:00");
 
-DROP TABLE IF EXISTS clades;
-CREATE TABLE IF NOT EXISTS clades(
+DROP TABLE IF EXISTS tax_trees;
+CREATE TABLE IF NOT EXISTS tax_trees(
     taxid INTEGER PRIMARY KEY,
     name TEXT
 );
 
-INSERT INTO clades VALUES
-    (256318, "metagenomics"),
+INSERT INTO tax_trees VALUES
     (9606, "human"),
+    (256318, "metagenomics"),
     (33208, "animal"),
     (33090, "green plants");
+
+DROP TABLE IF EXISTS study_taxtree;
+CREATE TABLE IF NOT EXISTS study_taxtree(
+    study_accession TEXT NOT NULL,
+    tax_tree TEXT NOT NULL,
+    PRIMARY KEY (study_accession, tax_tree),
+    FOREIGN KEY ([study_accession]) REFERENCES 'study' ([study_accession])
+        ON DELETE NO ACTION ON UPDATE NO ACTION,
+    FOREIGN KEY ([tax_tree]) REFERENCES 'tax_trees' ([taxid])
+        ON DELETE NO ACTION ON UPDATE NO ACTION
+);
+
