@@ -1,0 +1,7 @@
+name: mgscryer_py27_app
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - python=2.7
