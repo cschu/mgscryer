@@ -91,7 +91,7 @@ class Record:
             entity = getattr(self, field)
             new_record, updated_record = entity.update_db(cursor)
             record_states.append((new_record, updated_record))
-            if i < 2:
+            if field != "run":
                 entity2 = getattr(self, Record.FIELDS[i + 1])
                 table = "_".join(Record.FIELDS[i:i + 2])
                 id1, id2 = getattr(entity, entity.FIELDS[0]), getattr(entity2, entity2.FIELDS[0])
@@ -110,17 +110,14 @@ class EnaPortalScryer:
         self.offset = 0
         self.limit = limit
         self.conn = sqlite3.connect(db, isolation_level=None)
-        self._get_tax_trees()
         self._get_last_update()
         self.sleep_interval = sleep_interval
-    def _get_tax_trees(self):
-        self.tax_trees = get_tax_trees(self.conn.cursor())
     def _get_last_update(self):
         self.last_update = get_last_update(self.conn.cursor())
     def run(self):
         studies = set()
         limit = self.limit
-        for tax_tree, tax_label in self.tax_trees:
+        for tax_tree, tax_label in get_tax_trees(self.conn.cursor()):
             print(f"{tax_label} ({tax_tree}): ", end="", flush=True)
             record_states = dict()
             sub_query = f"%20AND%20tax_tree({tax_tree})%20AND%20last_updated%3E={self.last_update}"
@@ -144,7 +141,7 @@ class EnaPortalScryer:
                 print(f"Nothing to see here")
             else:
                 self._summarise_updates(record_states)
-        self._process_pubmed_links(self.conn.cursor(), studies)
+        self._add_pubmed_information(self.conn.cursor(), studies)
         set_timestamp(self.conn.cursor())
     def _summarise_updates(self, record_states):
         new_studies, updated_studies, new_samples, updated_samples, new_runs, updated_runs = 0, 0, 0, 0, 0, 0
@@ -165,10 +162,17 @@ class EnaPortalScryer:
                         updated_runs += 1
         print(f"studies {new_studies}|{updated_studies}, samples {new_samples}|{updated_samples}, runs {new_runs}|{updated_runs}")
         
-    def _process_pubmed_links(self, cursor, studies):
+    def _add_pubmed_information(self, cursor, studies):
+        def add_pubmed_links(cursor, studies):
+            for study_accession, pubmed_id in PubmedQuery.get_ids(studies):
+                try:
+                    insert_record(cursor, "study_pubmed", (study_accession, pubmed_id))
+                except:
+                    print("Couldn't update study_pubmed:", study_accession, pubmed_id, file=sys.stderr, flush=True)
+
         projects = {_id for _id in studies if _id.startswith("P")}
-        add_pubmed_information(cursor, studies.difference(projects))
-        add_pubmed_information(cursor, projects) # !@£$% SRA!
+        add_pubmed_links(cursor, studies.difference(projects))
+        add_pubmed_links(cursor, projects) # !@£$% SRA!
 
     def _get_records(self, query_string):
         offset = self.offset
@@ -186,25 +190,6 @@ class EnaPortalScryer:
                 break
             offset += self.limit
 
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("db")
-    args = ap.parse_args()
-
-    scryer = EnaPortalScryer(args.db)
-    print(*scryer.__dict__.items(), sep="\n")
-    scryer.run()
-
-
-def add_pubmed_information(cursor, studies):
-    for study_accession, pubmed_id in PubmedQuery.get_ids(studies):
-        try:
-            insert_record(cursor, "study_pubmed", (study_accession, pubmed_id))
-        except:
-            print("Couldn't update study_pubmed:", study_accession, pubmed_id, file=sys.stderr, flush=True)
-
 def exists_in_db(cursor, table, record):
     updates, existing_record = list(), list(check_record_exists(cursor, table, record[0]))
     if existing_record:
@@ -221,6 +206,16 @@ def process_updates(cursor, table, record):
     elif updates:
         update_record(cursor, table, record[0], updates)
     return not existing_record, bool(updates)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("db")
+    args = ap.parse_args()
+
+    scryer = EnaPortalScryer(args.db)
+    print(*scryer.__dict__.items(), sep="\n")
+    scryer.run()
 
 if __name__ == "__main__":
     main()
