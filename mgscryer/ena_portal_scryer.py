@@ -40,7 +40,25 @@ def set_timestamp(cursor):
     cursor.execute(f"UPDATE timepoints SET date_time = '{now}' WHERE action = 'last_update';")
     rows = cursor.fetchall()
     return rows
-	
+
+def exists_in_db(cursor, table, record):
+    updates, existing_record = list(), list(check_record_exists(cursor, table, record[0]))
+    if existing_record:
+        updates = [(header, new_col)
+                   for (header, cur_col), new_col in zip(existing_record, record)
+                   if new_col != cur_col]
+    return existing_record, updates
+
+def process_updates(cursor, table, record):
+    existing_record, updates = exists_in_db(cursor, table, record)
+    has_updates = not existing_record or updates
+    if not existing_record:
+        insert_record(cursor, table, record)
+    elif updates:
+        update_record(cursor, table, record[0], updates)
+    return not existing_record, bool(updates)
+
+
 class Entity:
     FIELDS = []
     def __init__(self, **kwargs):
@@ -69,7 +87,7 @@ class Sample(Entity):
     FIELDS = ["sample_accession", "host", "host_body_site", "host_tax_id", "environment_biome", "study_accession", "last_updated"]
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        
+
 class Run(Entity):
     FIELDS = ["run_accession", "experiment_title", 
               "description", "instrument_model", "instrument_platform",
@@ -91,25 +109,12 @@ class Record:
             entity = getattr(self, field)
             new_record, updated_record = entity.update_db(cursor)
             self.record_states[field] = (new_record, updated_record)
-            # def check_link_exists(cursor, table, field1, field2, id1, id2):
             if field == "study" and not check_link_exists(cursor, "study_taxtree", "study_accession", "tax_tree", entity.study_accession, tax_tree):
                 try:
                     insert_record(cursor, "study_taxtree", (entity.study_accession, tax_tree))
                 except Exception as e:
                     print(e)
                     print(f"Couldn't insert tax_tree link: {entity.study_accession} <-> {tax_tree}")
-
-            #if field != "run":
-            #    entity2 = getattr(self, Record.FIELDS[i + 1])
-            #    table = "_".join(Record.FIELDS[i:i + 2])
-            #    id1, id2 = getattr(entity, entity.FIELDS[0]), getattr(entity2, entity2.FIELDS[0])
-            #    if not check_link_exists(cursor, *table.split("_"), id1, id2):
-            #        try:
-            #            insert_record(cursor, table, (id1, id2))
-            #        except Exception as e:
-            #            print(e)
-            #            print(f"Couldn't update {table}: {id1} {id2}")
-        #return record_states
 
 class EnaPortalScryer:
     def __init__(self, db, base_url=BASE_API_URL, query=MAIN_QUERY, sub_query="", limit=1000, sleep_interval=0.1):
@@ -132,15 +137,14 @@ class EnaPortalScryer:
             query_string = self.base_url + self.query.format(**locals())
             response = self._get_records(query_string)
             for i, record in enumerate(response):
-                #entity_states = record.update_db(self.conn.cursor(), tax_tree=tax_tree)
                 record.update_db(self.conn.cursor(), tax_tree=tax_tree)
                 study_d = record_states.setdefault(record.study.study_accession, dict())
                 if not study_d:
-                    study_d["state"] = record.record_states["study"] #entity_states[0]
+                    study_d["state"] = record.record_states["study"]
                     study_d["samples"] = dict()
                 sample_d = study_d["samples"].setdefault(record.sample.sample_accession, dict())
                 if not sample_d:
-                    sample_d["state"] = record.record_states["sample"] #entity_states[1]
+                    sample_d["state"] = record.record_states["sample"]
                     sample_d["runs"] = dict()
                 run_d = sample_d["runs"].setdefault(record.run.run_accession, record.record_states["run"])
                 studies.add(record.study.study_accession)
@@ -152,6 +156,7 @@ class EnaPortalScryer:
                 self._summarise_updates(record_states)
         self._add_pubmed_information(self.conn.cursor(), studies)
         set_timestamp(self.conn.cursor())
+
     def _summarise_updates(self, record_states):
         new_studies, updated_studies, new_samples, updated_samples, new_runs, updated_runs = 0, 0, 0, 0, 0, 0
         for study, study_data in record_states.items():
@@ -170,7 +175,7 @@ class EnaPortalScryer:
                     elif run_state[1]:
                         updated_runs += 1
         print(f"studies {new_studies}|{updated_studies}, samples {new_samples}|{updated_samples}, runs {new_runs}|{updated_runs}")
-        
+
     def _add_pubmed_information(self, cursor, studies):
         def add_pubmed_links(cursor, studies):
             for study_accession, pubmed_id in PubmedQuery.get_ids(studies):
@@ -188,7 +193,6 @@ class EnaPortalScryer:
         while True:
             time.sleep(self.sleep_interval)
             query = query_string.format(offset=offset)
-            #print(query)
             try:
                 data = json.loads(requests.get(query).content.decode())
             except json.decoder.JSONDecodeError:
@@ -198,23 +202,6 @@ class EnaPortalScryer:
             if len(data) < self.limit:
                 break
             offset += self.limit
-
-def exists_in_db(cursor, table, record):
-    updates, existing_record = list(), list(check_record_exists(cursor, table, record[0]))
-    if existing_record:
-        updates = [(header, new_col) 
-                   for (header, cur_col), new_col in zip(existing_record, record)
-                   if new_col != cur_col]
-    return existing_record, updates
-
-def process_updates(cursor, table, record):
-    existing_record, updates = exists_in_db(cursor, table, record)
-    has_updates = not existing_record or updates
-    if not existing_record:
-        insert_record(cursor, table, record)
-    elif updates:
-        update_record(cursor, table, record[0], updates)
-    return not existing_record, bool(updates)
 
 
 def main():
