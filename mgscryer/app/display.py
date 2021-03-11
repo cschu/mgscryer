@@ -49,7 +49,7 @@ def get_sample_runs(cursor, sample_accession):
     runs = dict()
     for run_data in rows:
         run_accession, run_data = run_data[0], run_data[1:]
-        runs.setdefault(tuple(run_data[3:-3]), list()).append(run_accession)
+        runs.setdefault(tuple(run_data[2:-3]), list()).append(run_accession)
     return runs
 
 
@@ -78,9 +78,8 @@ def display_data(cursor):
             #print(*sample_type, len(samples), "samples", n_runs, "runs")
             for run_type, runs in run_data.items():
                 output.append("<li>{} {} runs</li>".format(run_type, len(runs)))
-                output.append("</ul></li>")
-                pass
-                #print(*run_type, len(runs))
+            output.append("</ul></li>")
+            #print(*run_type, len(runs))
             output.append("</ul>")
 
         output.append("</div>")
