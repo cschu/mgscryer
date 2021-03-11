@@ -43,10 +43,13 @@ def set_timestamp(cursor):
 
 def exists_in_db(cursor, table, record):
     updates, existing_record = list(), list(check_record_exists(cursor, table, record[0]))
+    where_timestamp = -1 if table != "study" else -2
     if existing_record:
-        updates = [(header, new_col)
-                   for (header, cur_col), new_col in zip(existing_record, record)
-                   if new_col != cur_col]
+        # print(existing_record[-1][1])
+        if datetime.fromisoformat(record[where_timestamp]) > datetime.fromisoformat(existing_record[where_timestamp][1]):
+            updates = [(header, new_col)
+                       for (header, cur_col), new_col in zip(existing_record, record)
+                       if new_col != cur_col]
     return existing_record, updates
 
 def process_updates(cursor, table, record):
